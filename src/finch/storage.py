@@ -154,13 +154,23 @@ class Library:
         if not path.is_file():
             raise FileNotFoundError(f"Source file not found: {path}")
         content = read_text_file(path)
+        source_title = title.strip() if title else path.stem.replace("_", " ")
+        return self.ingest_text(str(path), content, source_title)
+
+    def ingest_text(self, source_id: str, content: str, title: str) -> int:
+        """Index supplied text under a stable local path, URL, or note identifier."""
+        source_id = source_id.strip()
+        source_title = title.strip()
+        if not source_id:
+            raise ValueError("Every source needs a stable identifier.")
+        if not source_title:
+            raise ValueError("Every source needs a title.")
         pieces = chunk_text(content)
         if not pieces:
-            raise ValueError(f"{path.name} has no readable text to index.")
+            raise ValueError(f"{source_title} has no readable text to index.")
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        source_title = title.strip() if title else path.stem.replace("_", " ")
         previous = self.connection.execute(
-            "SELECT id, content_hash FROM documents WHERE path = ?", (str(path),)
+            "SELECT id, content_hash FROM documents WHERE path = ?", (source_id,)
         ).fetchone()
         if previous and previous["content_hash"] == digest:
             return 0
@@ -186,7 +196,7 @@ class Library:
             else:
                 cursor = self.connection.execute(
                     "INSERT INTO documents(path, title, content_hash, indexed_at) VALUES (?, ?, ?, ?)",
-                    (str(path), source_title, digest, utc_now()),
+                    (source_id, source_title, digest, utc_now()),
                 )
                 document_id = int(cursor.lastrowid)
 

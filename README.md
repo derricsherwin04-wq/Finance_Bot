@@ -13,7 +13,7 @@ examples for an occasional, opt-in LoRA fine-tuning run.
 
 ## What this prototype does
 
-- Ingests `.txt`, `.md`, and `.csv` course material into a local SQLite file.
+- Ingests `.txt`, `.md`, `.csv`, pasted notes, and student-submitted web pages into a local SQLite file.
 - Uses a no-download lexical retrieval baseline (SQLite FTS5) so it works on a
   modest laptop. A future embedding plug-in can improve semantic retrieval.
 - Calls a local [llama.cpp](https://github.com/ggml-org/llama.cpp) server through
@@ -69,14 +69,31 @@ sources alone answer the question.
    The library defaults to `.finch/finch.sqlite3` in the current directory.
    This folder contains the student's material and feedback; do not commit it.
 
+## Local browser UI
+
+After starting a local model, run this from the project folder:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m finch.web
+```
+
+Open `http://127.0.0.1:8765` in a browser. The interface can add a single
+webpage URL (HTML and plain-text pages), save a pasted note, ask cited questions,
+and store helpful/not-helpful feedback. Finch fetches only the URL a student
+explicitly submits—it does not crawl linked pages. Put course files in
+`materials/`; that directory is ignored by Git by default.
+
 ## Commands
 
 ```text
 python -m finch init [--db PATH]
 python -m finch ingest PATH [--title TITLE] [--db PATH]
+python -m finch ingest-url URL [--title TITLE] [--db PATH]
 python -m finch ask QUESTION [--sources-only] [--top-k 4] [--db PATH]
 python -m finch feedback RESPONSE_ID --rating up|down --correction TEXT [--db PATH]
-python -m finch export-training OUTPUT.jsonl [--min-rating up] [--db PATH]
+python -m finch export-training OUTPUT.jsonl [--rating up|down] [--db PATH]
+python -m finch.web [--port 8765] [--db PATH]
 python -m finch status [--db PATH]
 ```
 

@@ -10,6 +10,7 @@ import sys
 from .local_model import LocalModelError
 from .rag import ask
 from .storage import Library, database_path
+from .web_sources import ingest_url
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("path")
     ingest.add_argument("--title", help="Readable title to show in citations")
     ingest.add_argument("--db", help="SQLite database path")
+
+    url = sub.add_parser("ingest-url", help="Add one user-provided HTML or text webpage.")
+    url.add_argument("url")
+    url.add_argument("--title", help="Readable title to show in citations")
+    url.add_argument("--db", help="SQLite database path")
 
     question = sub.add_parser("ask", help="Retrieve sources and ask the local model.")
     question.add_argument("question")
@@ -62,6 +68,13 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"Indexed {count} chunks from {Path(args.path).name}.")
                 else:
                     print("That file is unchanged; the existing index was kept.")
+                return 0
+            if args.command == "ingest-url":
+                count = ingest_url(library, args.url, args.title)
+                if count:
+                    print(f"Indexed {count} chunks from the webpage.")
+                else:
+                    print("That webpage is unchanged; the existing index was kept.")
                 return 0
             if args.command == "ask":
                 result = ask(library, args.question, args.top_k, args.sources_only)

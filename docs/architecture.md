@@ -3,10 +3,10 @@
 ## Initial architecture
 
 ```text
-Student files (.txt/.md/.csv)
-             |
-             v
-      chunking + metadata
+Student files, pasted notes, or one submitted webpage
+                       |
+                       v
+               chunking + metadata
              |
              v
 SQLite + FTS5 <----> feedback / reviewed corrections
@@ -21,6 +21,17 @@ Finch chooses lexical retrieval first because it has a very small operating
 cost and no model download. This is often surprisingly effective for a student's
 own materials, where exact terms such as `WACC`, `CAPM`, `EBITDA`, and
 `discount rate` are meaningful.
+
+## Source and adaptation rules
+
+- A URL is a **source**, not a parameter update. Finch downloads only the page
+  the student adds, stores its text locally, and cites it in answers.
+- Notes and URLs become available immediately through retrieval; no training is
+  necessary to use them.
+- Feedback is a local record, not automatic training. A student must review
+  corrections before exporting candidates for an occasional LoRA experiment.
+- Keep the generator small (start at 0.6–1.7B parameters) and only move up if a
+  course-specific evaluation shows a real improvement.
 
 ## Next milestones
 
@@ -57,6 +68,7 @@ than scaling the generator.
 ## Privacy and data boundaries
 
 - Keep `.finch/` local; it contains source text, questions, answers, and feedback.
+- `materials/` is ignored by Git, so course files do not accidentally go to a public repository.
 - Do not ingest graded assessments or confidential employer data unless policy
   explicitly permits it.
 - Do not automatically send feedback to a trainer or a cloud endpoint.

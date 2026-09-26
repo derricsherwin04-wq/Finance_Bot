@@ -4,6 +4,7 @@ import unittest
 
 from finch.rag import ask
 from finch.storage import Library, chunk_text
+from finch.web_sources import _ReadableTextParser
 
 
 class FinchLibraryTests(unittest.TestCase):
@@ -47,6 +48,25 @@ class FinchLibraryTests(unittest.TestCase):
         self.assertGreater(self.library.ingest(self.source), 0)
         self.assertEqual(self.library.ingest(self.source), 0)
         self.assertEqual(self.library.counts()["documents"], 1)
+
+    def test_pasted_note_is_indexed_with_a_stable_identifier(self):
+        self.assertEqual(
+            self.library.ingest_text(
+                "note:portfolio returns",
+                "A portfolio return is the weighted average of its asset returns.",
+                "Portfolio Returns",
+            ),
+            1,
+        )
+        results = self.library.search("How do weighted portfolio returns work?")
+        self.assertEqual(results[0].title, "Portfolio Returns")
+
+    def test_html_extractor_omits_scripts_and_keeps_readable_text(self):
+        parser = _ReadableTextParser()
+        parser.feed("<html><head><title>NPV lesson</title><script>secret()</script></head><body><h1>NPV</h1><p>Accept positive NPV projects.</p></body></html>")
+        self.assertEqual(parser.title, "NPV lesson")
+        self.assertIn("Accept positive NPV projects.", parser.readable_text())
+        self.assertNotIn("secret", parser.readable_text())
 
 
 if __name__ == "__main__":

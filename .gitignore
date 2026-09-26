@@ -1,4 +1,5 @@
 .finch/
+materials/
 __pycache__/
 *.py[cod]
 .venv/
