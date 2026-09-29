@@ -10,6 +10,7 @@ import argparse
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import re
 from urllib.parse import parse_qs
 
 from .local_model import LocalModelError
@@ -20,6 +21,197 @@ from .web_sources import ingest_url
 
 def _field(values: dict[str, list[str]], name: str) -> str:
     return values.get(name, [""])[0].strip()
+
+
+_MATH_SYMBOLS = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "theta": "θ", "lambda": "λ", "mu": "μ", "pi": "π", "rho": "ρ",
+    "sigma": "σ", "infty": "∞", "sum": "∑", "prod": "∏", "cdot": "·",
+    "times": "×", "div": "÷", "pm": "±", "mp": "∓", "cdots": "…",
+    "ldots": "…", "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥",
+    "neq": "≠", "approx": "≈", "to": "→", "rightarrow": "→", "leftarrow": "←",
+}
+_MATH_WRAPPERS = {"text", "mathrm", "mathit", "mathbf", "operatorname"}
+
+
+def _take_group(value: str, start: int) -> tuple[str, int]:
+    """Return one balanced `{...}` group and the index after it."""
+    if start >= len(value) or value[start] != "{":
+        return "", start
+    depth = 1
+    index = start + 1
+    while index < len(value) and depth:
+        if value[index] == "{":
+            depth += 1
+        elif value[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        return value[start + 1 :], len(value)
+    return value[start + 1 : index - 1], index
+
+
+def _math_unit(value: str, start: int) -> tuple[str, int]:
+    if start >= len(value):
+        return "", start
+    if value[start] == "{":
+        group, end = _take_group(value, start)
+        return _render_math(group), end
+    return escape(value[start]), start + 1
+
+
+def _render_math(value: str) -> str:
+    """Render the small, common LaTex subset used in introductory finance formulas.
+
+    Keeping this renderer local avoids loading a large remote math library just
+    to present a few course formulas. Unknown input remains safely escaped.
+    """
+    output: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\":
+            command_match = re.match(r"[A-Za-z]+", value[index + 1 :])
+            if not command_match:
+                if index + 1 < len(value) and value[index + 1] in {",", ";", "!", " "}:
+                    index += 2
+                    continue
+                output.append(escape(value[index + 1] if index + 1 < len(value) else "\\"))
+                index += 2
+                continue
+            command = command_match.group(0)
+            index += len(command) + 1
+            if command == "frac":
+                numerator, next_index = _take_group(value, index)
+                denominator, end = _take_group(value, next_index)
+                if next_index == index or end == next_index:
+                    output.append("frac")
+                else:
+                    output.append(
+                        "<span class='fraction'><span class='numerator'>"
+                        + _render_math(numerator)
+                        + "</span><span class='denominator'>"
+                        + _render_math(denominator)
+                        + "</span></span>"
+                    )
+                    index = end
+            elif command == "sqrt":
+                radicand, end = _take_group(value, index)
+                if end != index:
+                    output.append("√<span class='radicand'>" + _render_math(radicand) + "</span>")
+                    index = end
+                else:
+                    output.append("√")
+            elif command in _MATH_WRAPPERS:
+                group, end = _take_group(value, index)
+                if end != index:
+                    output.append(_render_math(group))
+                    index = end
+                else:
+                    output.append(escape(command))
+            elif command in {"left", "right"}:
+                continue
+            else:
+                output.append(_MATH_SYMBOLS.get(command, escape(command)))
+        elif char in {"^", "_"}:
+            unit, end = _math_unit(value, index + 1)
+            tag = "sup" if char == "^" else "sub"
+            output.append(f"<{tag}>{unit}</{tag}>")
+            index = end
+        elif char in "{}":
+            # Braces only group LaTex input; they are not part of the formula.
+            index += 1
+        elif char == "~":
+            output.append("&nbsp;")
+            index += 1
+        else:
+            output.append(escape(char))
+            index += 1
+    return "".join(output)
+
+
+def _render_plain(text: str) -> str:
+    """Safely render the small Markdown subset encouraged by Finch's prompt."""
+    rendered = escape(text)
+    rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", rendered)
+
+
+def _render_inline(text: str) -> str:
+    pieces = re.split(r"(\$[^$\n]+\$)", text)
+    return "".join(
+        "<span class='inline-math'>" + _render_math(piece[1:-1].strip()) + "</span>"
+        if piece.startswith("$") and piece.endswith("$")
+        else _render_plain(piece)
+        for piece in pieces
+    )
+
+
+def _display_math_at(lines: list[str], start: int) -> tuple[str, int] | None:
+    """Find a single-dollar or double-dollar formula that occupies its own block."""
+    line = lines[start].strip()
+    single = re.fullmatch(r"\$(?!\$)(.+?)(?<!\$)\$", line)
+    if single:
+        return single.group(1), start + 1
+    if not line.startswith("$$"):
+        return None
+    content = line[2:]
+    if content.endswith("$$") and len(content) > 2:
+        return content[:-2], start + 1
+    following = start + 1
+    while following < len(lines):
+        if lines[following].strip().endswith("$$"):
+            content += " " + lines[following].strip()[:-2]
+            return content, following + 1
+        content += " " + lines[following]
+        following += 1
+    return None
+
+
+def _render_answer_text(answer: str) -> str:
+    """Turn a model response into readable study-note HTML without external assets."""
+    lines = answer.replace("\r\n", "\n").split("\n")
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].strip():
+            index += 1
+            continue
+        if formula := _display_math_at(lines, index):
+            math, index = formula
+            blocks.append("<div class='formula' aria-label='Formula'><span class='math'>" + _render_math(math.strip()) + "</span></div>")
+            continue
+        if heading := re.match(r"^\s{0,3}(#{1,3})\s+(.+?)\s*$", lines[index]):
+            level = min(len(heading.group(1)) + 1, 4)
+            blocks.append(f"<h{level}>" + _render_inline(heading.group(2)) + f"</h{level}>")
+            index += 1
+            continue
+        if re.match(r"^\s*[-*]\s+", lines[index]):
+            items: list[str] = []
+            while index < len(lines) and (item := re.match(r"^\s*[-*]\s+(.+)$", lines[index])):
+                items.append("<li>" + _render_inline(item.group(1)) + "</li>")
+                index += 1
+            blocks.append("<ul>" + "".join(items) + "</ul>")
+            continue
+        if re.match(r"^\s*\d+[.)]\s+", lines[index]):
+            items = []
+            while index < len(lines) and (item := re.match(r"^\s*\d+[.)]\s+(.+)$", lines[index])):
+                items.append("<li>" + _render_inline(item.group(1)) + "</li>")
+                index += 1
+            blocks.append("<ol>" + "".join(items) + "</ol>")
+            continue
+        paragraph: list[str] = []
+        while index < len(lines) and lines[index].strip():
+            if paragraph and (
+                _display_math_at(lines, index)
+                or re.match(r"^\s{0,3}#{1,3}\s+", lines[index])
+                or re.match(r"^\s*(?:[-*]|\d+[.)])\s+", lines[index])
+            ):
+                break
+            paragraph.append(lines[index].strip())
+            index += 1
+        blocks.append("<p>" + _render_inline(" ".join(paragraph)) + "</p>")
+    return "".join(blocks)
 
 
 def _render_answer(result: Answer | None) -> str:
@@ -40,7 +232,7 @@ def _render_answer(result: Answer | None) -> str:
     return f"""
     <section class='answer card'>
       <div class='eyebrow'>RESPONSE {result.response.id}</div>
-      <div class='answer-text'>{escape(result.response.answer)}</div>
+      <div class='answer-text'>{_render_answer_text(result.response.answer)}</div>
       <h3>Retrieved sources</h3>{source_html}
       <form method='post' class='feedback'>
         <input type='hidden' name='action' value='feedback'>
@@ -59,15 +251,16 @@ def _page(counts: dict[str, int], message: str = "", result: Answer | None = Non
 <html lang='en'>
 <head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
 <title>Finch RAG</title><style>
-* {{ box-sizing: border-box; }} body {{ margin: 0; font-family: Inter, system-ui, sans-serif; color: #172121; background: #f5f6f1; }}
-main {{ max-width: 1000px; margin: auto; padding: 42px 24px 70px; }} h1 {{ font-size: clamp(2.2rem, 6vw, 4.5rem); letter-spacing: -.06em; margin: 0; }}
-h2 {{ margin: 0 0 8px; }} h3 {{ margin: 26px 0 7px; font-size: .95rem; }} .tag {{ color: #176b50; font-weight: 750; letter-spacing: .11em; font-size: .74rem; }}
-.intro {{ max-width: 700px; font-size: 1.13rem; line-height: 1.6; }} .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin: 26px 0; }}
-.card {{ background: white; padding: 24px; border: 1px solid #dce3dc; border-radius: 16px; box-shadow: 0 7px 22px #1832240d; }} label {{ display:block; font-weight: 650; margin: 15px 0 6px; }}
-input, textarea {{ width: 100%; border: 1px solid #bdc9bf; border-radius: 8px; padding: 10px; font: inherit; background: #fbfcfa; }} textarea {{ min-height: 128px; resize: vertical; }}
-button {{ margin-top: 14px; background: #176b50; color: white; border: 0; border-radius: 8px; padding: 10px 14px; font: inherit; font-weight: 700; cursor: pointer; }} button.secondary {{ background: #52635a; }}
-.notice {{ background:#ddf3e6; border:1px solid #9bd1ad; padding:13px 16px; border-radius:10px; margin:20px 0; }} .muted, small {{ color:#52635a; line-height:1.45; }}
-.answer {{ margin-top: 25px; }} .answer-text {{ white-space: pre-wrap; line-height: 1.6; }} .eyebrow {{ color:#176b50; font-weight:700; font-size:.75rem; letter-spacing:.1em; margin-bottom:12px; }}
+* {{ box-sizing: border-box; }} body {{ margin: 0; font-family: "Google Sans", "Segoe UI", system-ui, sans-serif; color: #1f1f1f; background: #fff; }}
+main {{ max-width: 1050px; margin: auto; padding: 46px 24px 78px; }} h1 {{ font-size: clamp(2.5rem, 6vw, 4.6rem); letter-spacing: -.065em; margin: 0; font-weight: 650; }}
+h2 {{ margin: 0 0 8px; font-size: 1.35rem; letter-spacing: -.02em; }} h3 {{ margin: 26px 0 7px; font-size: .95rem; }} .tag {{ color: #146c4f; font-weight: 750; letter-spacing: .11em; font-size: .74rem; }}
+.intro {{ max-width: 720px; font-size: 1.13rem; line-height: 1.65; color: #444746; }} .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin: 28px 0; }}
+.card {{ background: #fff; padding: 24px; border: 1px solid #e0e3e7; border-radius: 18px; box-shadow: 0 1px 2px #1f1f1f0a; }} label {{ display:block; font-weight: 600; margin: 15px 0 6px; }}
+input, textarea {{ width: 100%; border: 1px solid #c4c7c5; border-radius: 10px; padding: 11px; font: inherit; background: #fff; }} textarea {{ min-height: 128px; resize: vertical; }}
+button {{ margin-top: 14px; background: #146c4f; color: white; border: 0; border-radius: 999px; padding: 10px 17px; font: inherit; font-weight: 650; cursor: pointer; }} button.secondary {{ background: #5f6368; }}
+.notice {{ background:#e6f4ea; border:1px solid #b7dfc5; padding:13px 16px; border-radius:12px; margin:22px 0; }} .muted, small {{ color:#5f6368; line-height:1.5; }}
+.answer {{ margin-top: 28px; padding: clamp(26px, 4vw, 44px); max-width: 900px; border-color: #dadce0; }} .answer-text {{ max-width: 790px; font-size: 1.08rem; line-height: 1.72; }} .answer-text p {{ margin: 0 0 22px; }} .answer-text h2, .answer-text h3, .answer-text h4 {{ margin: 38px 0 13px; color: #202124; line-height: 1.3; }} .answer-text h2 {{ font-size: 1.55rem; }} .answer-text h3 {{ font-size: 1.22rem; }} .answer-text ul, .answer-text ol {{ margin: 0 0 22px; padding-left: 25px; }} .answer-text li {{ padding-left: 5px; margin: 9px 0; }} .answer-text code {{ background: #f1f3f4; padding: 2px 5px; border-radius: 4px; }}
+.formula {{ margin: 27px 0; padding: 25px 16px; overflow-x: auto; text-align: center; border: 1px solid #e0e3e7; border-radius: 14px; background: #f8fafd; }} .math, .inline-math {{ font-family: "Cambria Math", Cambria, "Times New Roman", serif; }} .math {{ display: inline-block; min-width: max-content; font-size: clamp(1.25rem, 3vw, 1.65rem); letter-spacing: .015em; }} .inline-math {{ white-space: nowrap; }} .fraction {{ display: inline-flex; flex-direction: column; vertical-align: middle; text-align: center; line-height: 1.12; margin: 0 .08em; }} .numerator {{ padding: 0 .16em .08em; border-bottom: 1.5px solid currentColor; }} .denominator {{ padding: .08em .16em 0; }} .math sup, .math sub, .inline-math sup, .inline-math sub {{ font-size: .68em; line-height: 0; }} .radicand {{ border-top: 1px solid currentColor; padding-left: .09em; }} .eyebrow {{ color:#146c4f; font-weight:700; font-size:.75rem; letter-spacing:.1em; margin-bottom:16px; }}
 .feedback {{ display:grid; grid-template-columns:auto auto minmax(180px,1fr); gap:8px; align-items:end; }} .feedback button {{ margin:0; }} .feedback input {{ min-width:0; }}
 @media (max-width:600px) {{ .feedback {{ grid-template-columns: 1fr 1fr; }} .feedback input {{ grid-column: 1 / -1; }} }}
 </style></head><body><main>

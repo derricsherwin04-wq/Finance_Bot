@@ -4,6 +4,7 @@ import unittest
 
 from finch.rag import ask
 from finch.storage import Library, chunk_text
+from finch.web import _render_answer_text
 from finch.web_sources import _ReadableTextParser
 
 
@@ -67,6 +68,40 @@ class FinchLibraryTests(unittest.TestCase):
         self.assertEqual(parser.title, "NPV lesson")
         self.assertIn("Accept positive NPV projects.", parser.readable_text())
         self.assertNotIn("secret", parser.readable_text())
+
+    def test_answer_renderer_formats_markdown_and_finance_formula(self):
+        rendered = _render_answer_text(
+            "## NPV decision rule\n\n"
+            "Use the project rule below.\n\n"
+            "$\\text{NPV} = \\frac{CF_1}{(1+r)^1} - C_0$\n\n"
+            "- **r** is the discount rate\n"
+            "- **C_0** is the initial investment"
+        )
+        self.assertIn("<h3>NPV decision rule</h3>", rendered)
+        self.assertIn("class='fraction'", rendered)
+        self.assertIn("<sub>1</sub>", rendered)
+        self.assertIn("<strong>r</strong>", rendered)
+        self.assertNotIn("\\frac", rendered)
+
+    def test_answer_renderer_handles_the_model_style_seen_in_npv_answers(self):
+        rendered = _render_answer_text(
+            "**Formula:**\n\n"
+            "$ \\text{NPV} = \\frac{\\text{Cash Flow}_1 + \\cdots + \\text{Cash Flow}_n}{(1 + i)^1 + \\cdots + (1 + i)^n} $\n\n"
+            "Where:\n\n"
+            "- $ i $ = discount rate\n"
+            "- $ n $ = number of periods"
+        )
+        self.assertIn("<strong>Formula:</strong>", rendered)
+        self.assertIn("class='formula'", rendered)
+        self.assertIn("Cash Flow", rendered)
+        self.assertIn("…", rendered)
+        self.assertNotIn("\\text", rendered)
+        self.assertNotIn("$", rendered)
+
+    def test_answer_renderer_escapes_model_html(self):
+        rendered = _render_answer_text("<script>not executable</script>")
+        self.assertIn("&lt;script&gt;", rendered)
+        self.assertNotIn("<script>", rendered)
 
 
 if __name__ == "__main__":
